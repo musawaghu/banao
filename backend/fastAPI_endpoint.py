@@ -1,88 +1,96 @@
-import os
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import google.generativeai as genai
+import os
+from typing import Optional
 from dotenv import load_dotenv
-import httpx
 
 load_dotenv()
-
-# --- App Initialization ---
+# Initialize FastAPI
 app = FastAPI()
 
-from typing import List
-
-# Allow iOS app to connect to backend (CORS)
+# Add CORS middleware to allow iOS app to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # change to your frontend URL in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Pydantic Models ---
+# Configure Gemini API
+# Set your API key as environment variable: export GEMINI_API_KEY='your-key-here'
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+#GEMINI_API_KEY = "AIzaSyCdGx9cssWau06IEb-HCWQtm9s3FmkVv6Y"
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+
+# Request model
 class RecipeRequest(BaseModel):
     ingredients: str
-    calories: str
-    cuisine:str
-class Recipe(BaseModel):
-    title: str
-    description: str
+    calories: Optional[int] = None
+    cuisine: Optional[str] = None
+
+
+# Response model
 class RecipeResponse(BaseModel):
-    recipes: List[Recipe]
+    recipe: str
+    success: bool
+    message: Optional[str] = None
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-pro"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+@app.get("/")
+def read_root():
+    return {"message": "Recipe Generator API is running"}
 
-@app.post("/generate_recipes", response_model=RecipeResponse)
-async def generate_recipes(req: RecipeRequest):
-    prompt = f"""
-    Generate 3 recipes based on:
-    - Ingredients: {req.ingredients}
-    - Calories: {req.calories}
-    - Cuisine: {req.cuisine}
 
-    Return the result strictly in JSON format as:
-    [
-      {{
-        "title": "Recipe name",
-        "description": "Recipe description"
-      }},
-      ...
-    ]
-    """
-
-    body = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ]
-    }
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(GEMINI_URL, json=body)
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Gemini API request failed")
-
-        data = response.json()
-
+@app.post("/generate-recipe", response_model=RecipeResponse)
+async def generate_recipe(request: RecipeRequest):
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        raise HTTPException(status_code=500, detail="Invalid Gemini response")
+        if not GEMINI_API_KEY:
+            raise HTTPException(
+                status_code=500,
+                detail="GEMINI_API_KEY not configured"
+            )
 
-    # Clean up any code blocks (```json ... ```) and parse JSON
-    import json, re
-    text = re.sub(r"```json|```", "", text).strip()
+        # Build the prompt
+        prompt = f"Create a detailed recipe using the following:\n"
+        prompt += f"Ingredients: {request.ingredients}\n"
 
-    try:
-        recipes_json = json.loads(text)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Failed to parse AI JSON")
+        if request.calories:
+            prompt += f"Target Calories: approximately {request.calories} calories\n"
 
-    recipes = [Recipe(title=r["title"], description=r["description"]) for r in recipes_json]
-    return RecipeResponse(recipes=recipes)
+        if request.cuisine:
+            prompt += f"Cuisine Type: {request.cuisine}\n"
+
+        prompt += "\nProvide a complete recipe with:\n"
+        prompt += "- Recipe name\n"
+        prompt += "- Ingredient list with measurements\n"
+        prompt += "- Step-by-step cooking instructions\n"
+        prompt += "- Estimated prep and cook time\n"
+        prompt += "- Approximate calorie count per serving"
+
+        # Generate content using Gemini
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(prompt)
+
+        return RecipeResponse(
+            recipe=response.text,
+            success=True,
+            message="Recipe generated successfully"
+        )
+
+    except Exception as e:
+        return RecipeResponse(
+            recipe="",
+            success=False,
+            message=f"Error generating recipe: {str(e)}"
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
